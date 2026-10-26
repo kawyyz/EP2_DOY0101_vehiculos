@@ -29,7 +29,7 @@ jobs:
         run: ./mvnw -B verify
       - name: Publicar reporte de cobertura
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: reporte-jacoco
           path: target/site/jacoco
