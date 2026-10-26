@@ -45,19 +45,16 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
+      - name: Instalar Snyk CLI
+        uses: snyk/actions/setup@master
       - name: Snyk - dependencias (SCA)
-        uses: snyk/actions/maven@master
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: --severity-threshold=high
+        run: snyk test --severity-threshold=high
       - name: Snyk - codigo (SAST)
-        uses: snyk/actions/maven@master
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          command: code test
-          args: --severity-threshold=high
+        run: snyk code test --severity-threshold=high
 
   # 3) Build de imagen, escaneo de la imagen y publicacion en GHCR
   build-image:
@@ -85,7 +82,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Escaneo de la imagen con Trivy (bloquea si hay HIGH/CRITICAL)
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ms-vehiculos:scan
           severity: CRITICAL,HIGH
@@ -119,6 +116,7 @@ jobs:
     environment: staging
     permissions:
       contents: read
+      packages: read
     env:
       IMAGE: ${{ needs.build-image.outputs.image }}:${{ github.sha }}
       GIT_SHA: ${{ github.sha }}

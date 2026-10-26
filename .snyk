@@ -1,0 +1,7 @@
+version: v1.25.0
+ignore:
+  SNYK-JAVA-ORGGLASSFISHJAXB-20883142:
+    - '*':
+        reason: "el codigo no recibe xml por ende no podria ser victima, hibernate no es recurso natural de nosotros, no somos propietarios, y cuando expire la excepcion, se revisan las versiones nuevas y actualiza."
+        expires: 2027-01-26T00:00:00.000Z
+        created: 2026-10-26T00:00:00.000Z
