@@ -1,0 +1,33 @@
+spring:
+  application:
+    name: ms-vehiculos
+  datasource:
+    # Sin valores por defecto: las credenciales vienen de variables de entorno
+    # (.env en local, Secrets en GitHub Actions).
+    url: ${DB_URL}
+    username: ${DB_USERNAME}
+    password: ${DB_PASSWORD}
+  jpa:
+    hibernate:
+      ddl-auto: update
+    show-sql: ${SHOW_SQL:false}
+
+server:
+  port: ${SERVER_PORT:9004}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+  info:
+    env:
+      enabled: true
+
+# Trazabilidad: expone el commit desplegado en /actuator/info
+info:
+  git-sha: ${GIT_SHA:unknown}

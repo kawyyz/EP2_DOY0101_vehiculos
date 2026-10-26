@@ -1,0 +1,187 @@
+name: CI/CD ms-vehiculos
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-cd-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 1) Pruebas unitarias + cobertura minima (JaCoCo falla el build si no se cumple)
+  test:
+    name: Pruebas unitarias
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Ejecutar tests y verificar cobertura
+        run: ./mvnw -B verify
+      - name: Publicar reporte de cobertura
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: reporte-jacoco
+          path: target/site/jacoco
+
+  # 2) Analisis de dependencias y codigo con Snyk (falla si hay severidad alta o critica)
+  security:
+    name: Analisis de seguridad (Snyk)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+      - name: Snyk - dependencias (SCA)
+        uses: snyk/actions/maven@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          args: --severity-threshold=high
+      - name: Snyk - codigo (SAST)
+        uses: snyk/actions/maven@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: code test
+          args: --severity-threshold=high
+
+  # 3) Build de imagen, escaneo de la imagen y publicacion en GHCR
+  build-image:
+    name: Build y publicacion de imagen
+    runs-on: ubuntu-latest
+    needs: [test, security]
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.vars.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Nombre de imagen (en minusculas)
+        id: vars
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ms-vehiculos" >> "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@v3
+      - name: Build local de la imagen
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: ms-vehiculos:scan
+          build-args: GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Escaneo de la imagen con Trivy (bloquea si hay HIGH/CRITICAL)
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ms-vehiculos:scan
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Login en GHCR
+        if: github.event_name == 'push'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publicar imagen (tags SHA y latest)
+        if: github.event_name == 'push'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.vars.outputs.image }}:${{ github.sha }}
+            ${{ steps.vars.outputs.image }}:latest
+          build-args: GIT_SHA=${{ github.sha }}
+          cache-from: type=gha
+
+  # 4) Despliegue automatico en AWS (EC2 con Docker Compose) via SSH
+  deploy:
+    name: Despliegue en AWS EC2
+    runs-on: ubuntu-latest
+    needs: build-image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    environment: staging
+    permissions:
+      contents: read
+    env:
+      IMAGE: ${{ needs.build-image.outputs.image }}:${{ github.sha }}
+      GIT_SHA: ${{ github.sha }}
+      EC2_HOST: ${{ secrets.EC2_HOST }}
+      EC2_USER: ${{ secrets.EC2_USER }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configurar SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+      - name: Copiar docker-compose.yml al servidor
+        run: |
+          ssh -i ~/.ssh/deploy_key "$EC2_USER@$EC2_HOST" "mkdir -p ~/ms-vehiculos"
+          scp -i ~/.ssh/deploy_key docker-compose.yml "$EC2_USER@$EC2_HOST:~/ms-vehiculos/docker-compose.yml"
+      - name: Desplegar en EC2
+        run: |
+          ssh -i ~/.ssh/deploy_key "$EC2_USER@$EC2_HOST" 'bash -s' <<EOF
+          set -e
+          cd ~/ms-vehiculos
+          cat > .env <<ENVEOF
+          IMAGE=${IMAGE}
+          GIT_SHA=${GIT_SHA}
+          DB_NAME=vehiculos
+          DB_USERNAME=${{ secrets.DB_USERNAME }}
+          DB_PASSWORD=${{ secrets.DB_PASSWORD }}
+          DB_ROOT_PASSWORD=${{ secrets.DB_ROOT_PASSWORD }}
+          ENVEOF
+          chmod 600 .env
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker compose pull app
+          docker compose up -d --no-build --wait --wait-timeout 180
+          EOF
+      - name: Smoke test y verificacion de trazabilidad
+        run: |
+          ssh -i ~/.ssh/deploy_key "$EC2_USER@$EC2_HOST" "
+            set -e
+            curl -fsS http://localhost:9004/actuator/health | grep UP
+            curl -fsS http://localhost:9004/actuator/info | grep '${GIT_SHA}'
+          "
+      - name: Logs si algo fallo
+        if: failure()
+        run: |
+          ssh -i ~/.ssh/deploy_key "$EC2_USER@$EC2_HOST" "cd ~/ms-vehiculos && docker compose logs --no-color --tail=100" || true
+      - name: Limpiar clave SSH
+        if: always()
+        run: rm -f ~/.ssh/deploy_key
+
+  # 5) Alerta: abre un issue si cualquier etapa falla en main
+  alert:
+    name: Alerta de fallo
+    runs-on: ubuntu-latest
+    needs: [test, security, build-image, deploy]
+    if: failure() && github.ref == 'refs/heads/main'
+    permissions:
+      issues: write
+    steps:
+      - name: Crear issue de alerta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create --repo "$GITHUB_REPOSITORY" \
+            --title "Pipeline fallido en main (${GITHUB_SHA::7})" \
+            --body "Fallo el workflow CI/CD. Revisar: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
