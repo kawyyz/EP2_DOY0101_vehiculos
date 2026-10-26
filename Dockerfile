@@ -1,5 +1,5 @@
 # ---------- Etapa 1: build ----------
-FROM eclipse-temurin:21-jdk-alpine AS build
+FROM eclipse-temurin:25-jdk-alpine AS build
 WORKDIR /workspace
 
 # Se copia primero lo que cambia poco para aprovechar la cache de capas
@@ -12,7 +12,7 @@ COPY src/ src/
 RUN ./mvnw -B -q package -DskipTests
 
 # ---------- Etapa 2: runtime ----------
-FROM eclipse-temurin:21-jre-alpine
+FROM eclipse-temurin:25-jre-alpine
 WORKDIR /app
 
 # Actualiza los paquetes del sistema para incorporar parches de seguridad (p. ej. brotli-libs)
