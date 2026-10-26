@@ -45,19 +45,16 @@ jobs:
           distribution: temurin
           java-version: "21"
           cache: maven
+      - name: Instalar Snyk CLI
+        uses: snyk/actions/setup@master
       - name: Snyk - dependencias (SCA)
-        uses: snyk/actions/maven@master
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          args: --severity-threshold=high
+        run: snyk test --severity-threshold=high
       - name: Snyk - codigo (SAST)
-        uses: snyk/actions/maven@master
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        with:
-          command: code test
-          args: --severity-threshold=high
+        run: snyk code test --severity-threshold=high
 
   # 3) Build de imagen, escaneo de la imagen y publicacion en GHCR
   build-image:
