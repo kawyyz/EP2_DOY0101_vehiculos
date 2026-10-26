@@ -15,8 +15,8 @@ RUN ./mvnw -B -q package -DskipTests
 FROM eclipse-temurin:21-jre-alpine
 WORKDIR /app
 
-# Usuario sin privilegios (no se ejecuta como root)
-RUN addgroup -S app && adduser -S app -G app
+# Actualiza los paquetes del sistema para incorporar parches de seguridad (p. ej. brotli-libs)
+RUN apk upgrade --no-cache && addgroup -S app && adduser -S app -G app
 
 COPY --from=build /workspace/target/ms-vehiculos.jar app.jar
 
