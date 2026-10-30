@@ -68,7 +68,8 @@ push / PR a main
                  |
                  v
             deploy ........ solo en push a main
-                            SSH a EC2 + docker compose up
+                            entra a la tailnet, SSH al servidor
+                            docker compose up
                             smoke test de /health y /info
                  |
                  v
@@ -150,21 +151,49 @@ Recién ahí se publica en GHCR con dos tags: el SHA del commit y `latest`.
 
 ### 4. Despliegue automático
 
-El job `deploy` entra a una instancia EC2 por SSH:
+El entorno de despliegue es un servidor propio (home lab) con Docker, que no tiene ningún puerto
+abierto a internet. El runner de GitHub llega a él uniéndose a nuestra red privada de Tailscale, y
+desde ahí entra por SSH.
 
-1. Escribe la llave privada desde `secrets.EC2_SSH_KEY` y agrega el host a `known_hosts` con
+Al principio desplegábamos en una EC2, pero la instancia se nos cayó y el job empezó a fallar en el
+`ssh-keyscan`. Pasarlo al home lab nos dejó un destino que controlamos nosotros y que además no
+expone SSH a internet: el servidor solo acepta conexiones por la interfaz de Tailscale.
+
+Los pasos del job:
+
+1. `tailscale/github-action` levanta Tailscale en el runner con una auth key efímera, así que el
+   runner es un nodo más de la tailnet mientras dura la corrida y después desaparece.
+2. Escribe la llave privada desde `secrets.DEPLOY_SSH_KEY` y agrega el host a `known_hosts` con
    `ssh-keyscan`.
-2. Copia el `docker-compose.yml` del repositorio al servidor.
-3. Genera el `.env` remoto con los secrets (credenciales de la base, imagen y SHA) y le pone
+3. Copia el `docker-compose.yml` del repositorio al servidor.
+4. Genera el `.env` remoto con los secrets (credenciales de la base, imagen y SHA) y le pone
    permisos `600`.
-4. `docker compose pull` + `docker compose up -d --no-build --wait`. El `--no-build` es importante:
+5. `docker compose pull` + `docker compose up -d --no-build --wait`. El `--no-build` es importante:
    el servidor **no compila nada**, solo baja la imagen que ya pasó por todos los controles.
-5. Smoke test (ver más abajo).
-6. Si algo falló, imprime los últimos 100 logs de los contenedores.
-7. `if: always()` para borrar la llave SSH del runner, pase lo que pase.
+6. Smoke test (ver más abajo).
+7. Si algo falló, imprime los últimos 100 logs de los contenedores.
+8. `if: always()` para borrar la llave SSH del runner, pase lo que pase.
 
-Está asociado al environment `staging`, así que los secrets de despliegue no son accesibles desde
-los otros jobs.
+No hace falta `docker login` en el servidor porque el paquete de GHCR es público; así no queda
+ninguna credencial de registry guardada en el disco del home lab.
+
+El job está asociado al environment `staging`, así que los secrets de despliegue no son accesibles
+desde los otros jobs. Y como el repositorio es público, importa que el `deploy` esté condicionado a
+`push` sobre `main`: un pull request desde un fork nunca llega a ejecutarlo ni a ver esos secrets.
+
+La llave SSH que usa el pipeline está restringida en el `authorized_keys` del servidor con
+`from="100.64.0.0/10"` (el rango de direcciones de Tailscale) más `no-agent-forwarding` y
+`no-X11-forwarding`: aunque se filtrara, solo sirve desde dentro de la tailnet.
+
+Secrets que usa el job, todos en el environment `staging`:
+
+| Secret | Para qué |
+|---|---|
+| `TAILSCALE_AUTHKEY` | Auth key efímera para que el runner entre a la tailnet |
+| `DEPLOY_HOST` | Dirección del servidor dentro de la tailnet |
+| `DEPLOY_USER` | Usuario de despliegue |
+| `DEPLOY_SSH_KEY` | Llave privada de ese usuario |
+| `DB_NAME`, `DB_USERNAME`, `DB_PASSWORD`, `DB_ROOT_PASSWORD` | Credenciales de MySQL |
 
 ### 5. Alerta
 
@@ -203,9 +232,9 @@ Lo que ajustamos en `docker-compose.yml`:
 
 - **Límites de recursos** por servicio: 1 CPU y 512M de memoria para la app y para MySQL.
 - **JVM acotada a mano** (`-Xmx256m -Xss512k -XX:MaxMetaspaceSize=128m -XX:+UseSerialGC`) para que
-  la app quepa junto a la base en la instancia. El Dockerfile trae `MaxRAMPercentage=75` con
+  la app quepa junto a la base en el servidor. El Dockerfile trae `MaxRAMPercentage=75` con
   `UseContainerSupport` como valor por defecto cuando no se pasa nada.
-- **MySQL ajustado** para instancia chica: `performance-schema=OFF`, buffer pool de 128M,
+- **MySQL ajustado** para servidor chico: `performance-schema=OFF`, buffer pool de 128M,
   50 conexiones máximo y binlog desactivado.
 - **Orden de arranque real**: la app tiene `depends_on` con `condition: service_healthy`, no solo
   `depends_on` a secas. No intenta conectarse a una base que todavía está inicializando.
@@ -259,7 +288,7 @@ Los dejamos anotados porque fueron la mitad del trabajo:
 - **`mvnw` sin permiso de ejecución.** El archivo estaba versionado sin el bit `+x`, así que el
   build de la imagen moría con "permission denied". Hubo que versionar el bit de ejecución, y además
   el Dockerfile hace `chmod +x mvnw` por si acaso.
-- **La instancia se quedaba sin memoria.** MySQL con la configuración por defecto más la JVM sin
+- **El servidor se quedaba sin memoria.** MySQL con la configuración por defecto más la JVM sin
   límite no cabían juntos y el contenedor de la app se moría apenas arrancaba. De ahí salieron los
   `deploy.resources.limits`, el `JAVA_OPTS` acotado y el ajuste del buffer pool de MySQL.
 - **Un hallazgo crítico de Snyk sin parche.** `jaxb-core`, que entra por Hibernate. Primero fijamos

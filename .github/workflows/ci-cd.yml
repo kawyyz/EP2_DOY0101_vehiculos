@@ -107,36 +107,40 @@ jobs:
           build-args: GIT_SHA=${{ github.sha }}
           cache-from: type=gha
 
-  # 4) Despliegue automatico en AWS (EC2 con Docker Compose) via SSH
+  # 4) Despliegue automatico en el home lab, entrando por la tailnet (Tailscale)
   deploy:
-    name: Despliegue en AWS EC2
+    name: Despliegue en el home lab
     runs-on: ubuntu-latest
     needs: build-image
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     environment: staging
     permissions:
       contents: read
-      packages: read
     env:
       IMAGE: ${{ needs.build-image.outputs.image }}:${{ github.sha }}
       GIT_SHA: ${{ github.sha }}
-      EC2_HOST: ${{ secrets.EC2_HOST }}
-      EC2_USER: ${{ secrets.EC2_USER }}
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
     steps:
       - uses: actions/checkout@v7
+      - name: Unirse a la tailnet
+        uses: tailscale/github-action@v3
+        with:
+          authkey: ${{ secrets.TAILSCALE_AUTHKEY }}
+          version: latest
       - name: Configurar SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.EC2_SSH_KEY }}" > ~/.ssh/deploy_key
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/deploy_key
           chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -H "$EC2_HOST" >> ~/.ssh/known_hosts
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
       - name: Copiar docker-compose.yml al servidor
         run: |
-          ssh -i ~/.ssh/deploy_key "$EC2_USER@$EC2_HOST" "mkdir -p ~/ms-vehiculos"
-          scp -i ~/.ssh/deploy_key docker-compose.yml "$EC2_USER@$EC2_HOST:~/ms-vehiculos/docker-compose.yml"
-      - name: Desplegar en EC2
+          ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" "mkdir -p ~/ms-vehiculos"
+          scp -i ~/.ssh/deploy_key docker-compose.yml "$DEPLOY_USER@$DEPLOY_HOST:~/ms-vehiculos/docker-compose.yml"
+      - name: Desplegar
         run: |
-          ssh -i ~/.ssh/deploy_key "$EC2_USER@$EC2_HOST" 'bash -s' <<EOF
+          ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" 'bash -s' <<EOF
           set -e
           cd ~/ms-vehiculos
           cat > .env <<ENVEOF
@@ -148,13 +152,12 @@ jobs:
           DB_ROOT_PASSWORD=${{ secrets.DB_ROOT_PASSWORD }}
           ENVEOF
           chmod 600 .env
-          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           docker compose pull app
           docker compose up -d --no-build --wait --wait-timeout 180
           EOF
       - name: Smoke test y verificacion de trazabilidad
         run: |
-          ssh -i ~/.ssh/deploy_key "$EC2_USER@$EC2_HOST" "
+          ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" "
             set -e
             curl -fsS http://localhost:9004/actuator/health | grep UP
             curl -fsS http://localhost:9004/actuator/info | grep '${GIT_SHA}'
@@ -162,7 +165,7 @@ jobs:
       - name: Logs si algo fallo
         if: failure()
         run: |
-          ssh -i ~/.ssh/deploy_key "$EC2_USER@$EC2_HOST" "cd ~/ms-vehiculos && docker compose logs --no-color --tail=100" || true
+          ssh -i ~/.ssh/deploy_key "$DEPLOY_USER@$DEPLOY_HOST" "cd ~/ms-vehiculos && docker compose logs --no-color --tail=100" || true
       - name: Limpiar clave SSH
         if: always()
         run: rm -f ~/.ssh/deploy_key
