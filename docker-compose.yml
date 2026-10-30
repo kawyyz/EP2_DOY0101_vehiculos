@@ -3,6 +3,12 @@ services:
     image: mysql:8.4
     container_name: vehiculos-db
     restart: unless-stopped
+    # Menor consumo de memoria (instancia pequena)
+    command:
+      - --performance-schema=OFF
+      - --innodb-buffer-pool-size=128M
+      - --max-connections=50
+      - --disable-log-bin
     environment:
       MYSQL_DATABASE: ${DB_NAME:-vehiculos}
       MYSQL_USER: ${DB_USERNAME}
@@ -41,6 +47,8 @@ services:
       DB_PASSWORD: ${DB_PASSWORD}
       SERVER_PORT: "9004"
       GIT_SHA: ${GIT_SHA:-local}
+      # Limita la memoria de la JVM para que quepa junto a MySQL
+      JAVA_OPTS: "-Xmx256m -Xss512k -XX:MaxMetaspaceSize=128m -XX:+UseSerialGC"
     ports:
       - "9004:9004"
     networks:
